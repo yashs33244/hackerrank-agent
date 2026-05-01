@@ -199,21 +199,45 @@ def _fetch_models(provider: str, api_key: str) -> list[str]:
         if provider == "gemini":
             from google import genai
             client = genai.Client(api_key=api_key)
-            models = list(client.models.list())
+            raw = list(client.models.list())
+            # Only keep text-generation models; skip specialised/non-text variants
+            skip_keywords = [
+                "embedding", "aqa", "imagen", "veo", "nano",
+                "tts", "audio", "live", "robotics", "lyria",
+                "deep-research", "gemma", "clip", "image-preview",
+                "customtools", "computer-use",
+            ]
             names = []
-            for m in models:
+            for m in raw:
                 name = getattr(m, "name", "") or ""
-                supported = getattr(m, "supported_generation_methods", []) or []
-                if "generateContent" in supported and "embedding" not in name.lower():
-                    names.append(name)
-            return sorted(names)
+                if not name:
+                    continue
+                if any(kw in name.lower() for kw in skip_keywords):
+                    continue
+                names.append(name)
+            if not names:
+                names = [getattr(m, "name", "") for m in raw if getattr(m, "name", "")]
+            # Sort: gemini-3.1 > gemini-3 > gemini-2.5 > gemini-2 > rest
+            def _sort_key(n: str) -> tuple:
+                if "3.1" in n: return (0, n)
+                if "3" in n:   return (1, n)
+                if "2.5" in n: return (2, n)
+                if "2" in n:   return (3, n)
+                return (4, n)
+            return sorted(names, key=_sort_key)
 
         elif provider == "anthropic":
             import anthropic
             client = anthropic.Anthropic(api_key=api_key)
             response = client.models.list()
             names = [m.id for m in response.data]
-            return sorted(names)
+            # Sort: opus first, then sonnet, then haiku
+            def _sort_key(n: str) -> tuple:
+                if "opus" in n: return (0, n)
+                if "sonnet" in n: return (1, n)
+                if "haiku" in n: return (2, n)
+                return (3, n)
+            return sorted(names, key=_sort_key)
 
         elif provider == "openai":
             from openai import OpenAI
