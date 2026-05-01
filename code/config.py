@@ -64,10 +64,6 @@ class Settings:
 
 def _load_settings() -> Settings:
     api_key = os.getenv("GEMINI_API_KEY", "")
-    if not api_key:
-        raise ValueError(
-            "GEMINI_API_KEY is not set. Copy .env.example to .env and add your key."
-        )
 
     repo_root = _REPO_ROOT
     code_dir = Path(__file__).resolve().parent

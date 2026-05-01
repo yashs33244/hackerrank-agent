@@ -101,3 +101,57 @@ class PipelineFactory:
             critic=CriticAgent(client=low),
             formatter=FormatterAgent(),
         )
+
+    @staticmethod
+    def create_with_config(
+        provider: str,
+        api_key: str,
+        low_model: str,
+        medium_model: str,
+        high_model: str,
+    ) -> Pipeline:
+        """Construct a Pipeline from explicit provider/key/model config.
+
+        Used by the CLI wizard so the user's runtime choices take effect
+        without relying on .env for the primary key.
+        """
+        from index.compress import LLMContextCompressor
+        from index.search import BM25Searcher
+
+        provider = provider.lower()
+
+        if provider == "gemini":
+            from agents.gemini_client import GeminiClient
+            from google import genai as _genai
+            sdk = _genai.Client(api_key=api_key)
+            low = GeminiClient(low_model, sdk)
+            medium = GeminiClient(medium_model, sdk)
+            high = GeminiClient(high_model, sdk)
+        elif provider == "anthropic":
+            from agents.anthropic_client import AnthropicClient
+            low = AnthropicClient(low_model, api_key)
+            medium = AnthropicClient(medium_model, api_key)
+            high = AnthropicClient(high_model, api_key)
+        elif provider == "openai":
+            from agents.openai_client import OpenAIClient
+            low = OpenAIClient(low_model, api_key)
+            medium = OpenAIClient(medium_model, api_key)
+            high = OpenAIClient(high_model, api_key)
+        else:
+            raise ValueError(f"Unknown provider: {provider!r}. Choose gemini, anthropic, or openai.")
+
+        searcher = BM25Searcher()
+        compressor = LLMContextCompressor(low)
+
+        return Pipeline(
+            router=RouterAgent(client=low),
+            triage=TriageAgent(client=medium),
+            responder=ResponderAgent(
+                client=medium,
+                high_client=high,
+                searcher=searcher,
+                compressor=compressor,
+            ),
+            critic=CriticAgent(client=low),
+            formatter=FormatterAgent(),
+        )
