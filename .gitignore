@@ -31,3 +31,12 @@ data/index/
 data/embeddings/
 *.sqlite
 *.db
+
+# dev-only script outputs (not deliverable)
+scripts/eval_output.csv
+scripts/eval_report.json
+scripts/improve_checkpoints/
+
+# log files (outside repo by design, but belt-and-suspenders)
+*.log
+hackerrank_orchestrate/

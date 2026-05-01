@@ -187,27 +187,139 @@ without updating this file.
 ├── README.md                    # human-facing quickstart
 ├── .gitignore
 ├── .env.example                 # copy to .env; never commit .env
+├── .mcp.json                    # MCP auto-discovery (Claude Code / Cursor)
 ├── code/
-│   ├── your_file.py
-│   ├── agent.py
-│   └── main.py
-├── support_issues/
-│   ├── sample_support_issues.csv             # sample tickets + expected signals
-│   └── support_issues.csv
-│   └── output.csv
+│   ├── main.py                  # [PRIMARY] Batch CSV entry point
+│   ├── cli.py                   # [CLI] Single ticket / batch / REPL
+│   ├── mcp_server.py            # [MCP] stdio JSON-RPC 2.0 server
+│   ├── pipeline.py              # Agent orchestration
+│   ├── config.py                # Settings (env vars, model names, paths)
+│   └── agents/                  # RouterAgent, TriageAgent, ResponderAgent,
+│                                #   CriticAgent, FormatterAgent
+├── support_tickets/
+│   ├── sample_support_tickets.csv   # sample tickets + expected signals
+│   ├── support_tickets.csv          # full evaluation set
+│   └── output.csv                   # written by main.py / cli.py --csv
 ├── data/
-|   ├── visa/
-|   ├── hackerrank/
-|   ├── claude/
+│   ├── visa/
+│   ├── hackerrank/
+│   └── claude/
+```
 
+### 6.2 Entry points
+
+| Mode | Command | Description |
+|---|---|---|
+| Batch CSV | `python code/main.py` | Reads `support_tickets/support_tickets.csv`, writes `output.csv` |
+| Single ticket | `python code/cli.py --ticket "..." --company "..."` | Prints JSON to stdout |
+| Batch CSV (CLI) | `python code/cli.py --csv <file> [--output <file>]` | Custom input/output paths |
+| Interactive REPL | `python code/cli.py --interactive` | Type tickets, get JSON responses |
+| MCP server | `python code/mcp_server.py` | stdio MCP server for Claude Code / Cursor / Gemini CLI |
+
+### 6.3 MCP tool contract
+
+The MCP server exposes exactly one tool:
+
+```
+triage_ticket(ticket: str, company?: str, subject?: str) -> TicketOutput
+
+TicketOutput:
+  status:        "replied" | "escalated"
+  product_area:  string  (e.g. "hackerrank/submissions")
+  response:      string  (the agent's reply to the user)
+  justification: string  (internal reasoning / critic summary)
+  request_type:  string  (e.g. "account_access")
+```
+
+### 6.4 CLI quick reference
+
+```bash
+# Single ticket → JSON
+python code/cli.py --ticket "I can't log in" --company HackerRank
+
+# Batch CSV
+python code/cli.py --csv support_tickets/support_tickets.csv
+
+# Interactive REPL
+python code/cli.py --interactive
+
+# MCP server (pipe JSON-RPC messages to stdin)
+python code/mcp_server.py
+```
+
+### 6.5 Per-tool integration guide
+
+#### Gemini CLI
+The workspace contains a pre-built skill at `.gemini/skills/support-triage/SKILL.md`.
+It is also installed globally at `~/.gemini/skills/support-triage/`.
+
+```bash
+# List available skills (should show support-triage)
+gemini skills list
+
+# Use inside a Gemini CLI session:
+# "Triage this ticket: I cannot submit my HackerRank solution"
+# "Run the full pipeline on the CSV"
+# "What models are available?" → runs discover_models.py
+```
+
+The skill also supports workspace-level installation:
+```bash
+gemini skills install ./.gemini/skills/support-triage --scope workspace
+```
+
+#### Claude Code
+`.mcp.json` at repo root is auto-loaded. No manual setup.
+Claude Code can call `triage_ticket(ticket, company, subject)` as a native tool.
+`AGENTS.md` is also auto-loaded and provides full project context.
+
+```bash
+# Inside Claude Code:
+# "Triage this ticket: ..."  → Claude calls triage_ticket MCP tool
+# "Run the pipeline" → Claude runs code/main.py
+```
+
+#### OpenAI Codex CLI
+`AGENTS.md` is read automatically. Any tool that uses AGENTS.md can use:
+
+```bash
+# Codex will read AGENTS.md and can invoke:
+python code/cli.py --ticket "..." --company "..."
+# Or the MCP server (if Codex supports MCP):
+python code/mcp_server.py
+```
+
+Codex skills (`.agents/skills/`) format is also compatible — see the workspace
+skill at `.gemini/skills/support-triage/SKILL.md` as a reference template.
+
+#### Any other tool (curl / subprocess)
+```bash
+# Single ticket → JSON (works from any language)
+python code/cli.py --ticket "My card was stolen" --company Visa
+
+# MCP: pipe JSON-RPC to stdin
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"triage_ticket","arguments":{"ticket":"cannot log in","company":"HackerRank"}}}' \
+  | python code/mcp_server.py
+```
+
+#### Discover real available models (don't guess)
+```bash
+# Query the live Gemini API — no guessing model names
+python code/discover_models.py
+
+# Also check other providers
+python code/discover_models.py --provider all
+
+# Auto-update .env with best available models
+python code/discover_models.py --write-env
 ```
 
 ### 6.6 Constraints that make the submission evaluable
 
-- **Deterministic where possible.**.
-- **Add proper README** to the code/ you write.
-- **Read secrets from env vars only** (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-  etc.). Never hardcode.
+- **Deterministic where possible.**
+- **Add proper README** to the `code/` directory.
+- **Read secrets from env vars only** (`GEMINI_API_KEY`, etc.). Never hardcode.
+- **Do not rename** `code/main.py`, `code/cli.py`, or `code/mcp_server.py`.
 ---
 
 

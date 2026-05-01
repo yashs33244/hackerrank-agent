@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "hackerrank-triage-agent": {
+      "command": "python",
+      "args": ["code/mcp_server.py"],
+      "description": "HackerRank support-ticket triage agent (MCP stdio transport). Tool: triage_ticket(ticket, company, subject).",
+      "env": {}
+    }
+  }
+}
