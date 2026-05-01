@@ -32,10 +32,14 @@ _CODE_DIR = Path(__file__).resolve().parent
 if str(_CODE_DIR) not in sys.path:
     sys.path.insert(0, str(_CODE_DIR))
 
-from rich.console import Console
+from rich import box
+from rich.align import Align
+from rich.columns import Columns
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.progress import (
     BarColumn,
+    Column,
     MofNCompleteColumn,
     Progress,
     SpinnerColumn,
@@ -44,8 +48,8 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.prompt import Confirm, Prompt
+from rich.rule import Rule
 from rich.table import Table
-from rich import box
 from rich.text import Text
 
 from config import settings
@@ -98,7 +102,7 @@ PROVIDER_KEYS = ["gemini", "anthropic", "openai"]
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _run_ticket_with_state(pipeline, ticket: str, company: str, subject: str):
-    """Run pipeline and return (output_dict, state) so caller can read critic scores."""
+    """Run pipeline and return (output_dict, state)."""
     state = TicketState(ticket=ticket, subject=subject, company=company)
     output = pipeline.run(state)
     return output.to_dict(), state
@@ -118,79 +122,53 @@ def _write_csv(rows: list[dict], path: Path) -> None:
         writer.writerows(rows)
 
 
-def _bar(score: int, max_score: int = 10, width: int = 10) -> str:
-    filled = round(score / max_score * width)
-    return "█" * filled + "░" * (width - filled)
-
-
 def _show_result_panel(result: dict, state) -> None:
     """Display a beautifully formatted result panel."""
     status = result.get("status", "").upper()
-    status_color = "green" if status == "REPLIED" else "yellow"
-    status_badge = f"[bold {status_color}]● {status}[/bold {status_color}]"
+
+    if status == "REPLIED":
+        status_badge = "[bold white on green] REPLIED [/bold white on green]"
+    else:
+        status_badge = "[bold white on dark_orange3] ESCALATED [/bold white on dark_orange3]"
 
     product_area = result.get("product_area", "—")
     request_type = result.get("request_type", "—")
     response_text = result.get("response", "—")
     justification = result.get("justification", "—")
 
-    # Build the content table
-    grid = Table.grid(padding=(0, 1))
-    grid.add_column(style="bold dim", min_width=14)
-    grid.add_column()
-    grid.add_column(style="bold dim", min_width=14)
-    grid.add_column()
+    # Top meta grid — status badge + request type side by side
+    meta = Table.grid(padding=(0, 2))
+    meta.add_column(min_width=16)
+    meta.add_column(min_width=22)
+    meta.add_row(status_badge, f"[dim]{request_type}[/dim]")
+    meta.add_row("[dim]Status[/dim]", "[dim]Request Type[/dim]")
 
-    grid.add_row("Status", status_badge, "Request Type", f"[cyan]{request_type}[/cyan]")
-    grid.add_row("Product Area", f"[cyan]{product_area}[/cyan]", "", "")
+    lines: list = [
+        meta,
+        "",
+        Text(f"Product Area: {product_area}", style="bright_cyan"),
+        "",
+        Rule(style="dim"),
+        "",
+        Text("Response", style="bold white"),
+        "",
+        Text(response_text, style="white"),
+        "",
+        Rule(style="dim"),
+        "",
+        Text("Justification", style="bold white"),
+        "",
+        Text(justification, style="dim"),
+    ]
 
-    # Build the full panel content
-    lines: list = [grid, ""]
-
-    # Response section
-    lines.append(Text("Response", style="bold"))
-    lines.append(Text(response_text, style="white"))
-    lines.append("")
-
-    # Justification section
-    lines.append(Text("Justification", style="bold"))
-    lines.append(Text(justification, style="dim"))
-
-    # Critic scores (if available)
-    if state and state.critic_scores:
-        scores = state.critic_scores
-        lines.append("")
-        lines.append(Text("Quality Scores (Critic)", style="bold"))
-
-        score_grid = Table.grid(padding=(0, 2))
-        score_grid.add_column(style="dim", min_width=14)
-        score_grid.add_column()
-        score_grid.add_column(style="dim", min_width=16)
-        score_grid.add_column()
-        score_grid.add_column(style="dim", min_width=16)
-        score_grid.add_column()
-
-        g = scores.grounding
-        s = scores.safety
-        c = scores.completeness
-        score_grid.add_row(
-            "Grounding",
-            f"[green]{_bar(g)}[/green] {g}/10",
-            "Safety",
-            f"[green]{_bar(s)}[/green] {s}/10",
-            "Completeness",
-            f"[green]{_bar(c)}[/green] {c}/10",
-        )
-        lines.append(score_grid)
-
-    from rich.console import Group
     panel_content = Group(*lines)
 
     console.print()
     console.print(Panel(
         panel_content,
-        title="[bold]Result[/bold]",
+        title="[bold bright_white]Triage Result[/bold bright_white]",
         border_style="bright_blue",
+        box=box.ROUNDED,
         padding=(1, 2),
     ))
 
@@ -215,21 +193,139 @@ def _validate_api_key(provider: str, api_key: str) -> Optional[str]:
         return str(exc)
 
 
+def _fetch_models(provider: str, api_key: str) -> list[str]:
+    """Fetch real model names from the provider API. Falls back to PROVIDER_DEFAULTS on error."""
+    try:
+        if provider == "gemini":
+            from google import genai
+            client = genai.Client(api_key=api_key)
+            models = list(client.models.list())
+            names = []
+            for m in models:
+                name = getattr(m, "name", "") or ""
+                supported = getattr(m, "supported_generation_methods", []) or []
+                if "generateContent" in supported and "embedding" not in name.lower():
+                    names.append(name)
+            return sorted(names)
+
+        elif provider == "anthropic":
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            response = client.models.list()
+            names = [m.id for m in response.data]
+            return sorted(names)
+
+        elif provider == "openai":
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            response = client.models.list()
+            names = [
+                m.id for m in response.data
+                if any(x in m.id.lower() for x in ["gpt", "o1", "o3", "o4"])
+            ]
+            return sorted(names, reverse=True)
+
+    except Exception:
+        pass
+
+    # Fallback to hardcoded defaults
+    p = PROVIDER_DEFAULTS[provider]
+    return [p["high"], p["medium"], p["low"]]
+
+
+def _select_models_from_list(provider: str, models: list[str]) -> Tuple[str, str, str]:
+    """Show fetched model list as a numbered menu, let user pick LOW/MEDIUM/HIGH."""
+    p = PROVIDER_DEFAULTS[provider]
+    label = PROVIDER_DEFAULTS[provider]["label"]
+
+    # Sensible defaults: first=HIGH, second=MEDIUM, third=LOW
+    default_high = models[0] if len(models) > 0 else p["high"]
+    default_medium = models[1] if len(models) > 1 else p["medium"]
+    default_low = models[2] if len(models) > 2 else p["low"]
+
+    default_high_idx = 1
+    default_medium_idx = 2 if len(models) > 1 else 1
+    default_low_idx = 3 if len(models) > 2 else (2 if len(models) > 1 else 1)
+
+    # Build model list table
+    model_table = Table(
+        title=f"Available Models (live from {label} API)",
+        box=box.ROUNDED,
+        title_style="bold bright_white",
+        show_header=False,
+        padding=(0, 2),
+        border_style="bright_blue",
+    )
+    model_table.add_column("Num", style="bold cyan", width=5)
+    model_table.add_column("Model", style="white")
+
+    for idx, name in enumerate(models, 1):
+        model_table.add_row(str(idx), name)
+
+    console.print()
+    console.print(model_table)
+    console.print()
+
+    def _pick(tier: str, agents: str, default_idx: int, default_name: str) -> str:
+        raw = Prompt.ask(
+            f"  [bold]Select {tier} model[/bold] [dim]({agents})[/dim]",
+            default=str(default_idx),
+        ).strip()
+        # Direct model name (not a number)
+        if not raw.isdigit():
+            return raw or default_name
+        idx = int(raw) - 1
+        if 0 <= idx < len(models):
+            return models[idx]
+        return default_name
+
+    low_model = _pick(
+        "LOW   ", "Router · Critic · Compressor", default_low_idx, default_low
+    )
+    medium_model = _pick(
+        "MEDIUM", "Triage · Responder          ", default_medium_idx, default_medium
+    )
+    high_model = _pick(
+        "HIGH  ", "Responder — high-risk only  ", default_high_idx, default_high
+    )
+
+    console.print()
+    console.print(f"  [bold green]✓[/bold green] LOW    → [bright_cyan]{low_model}[/bright_cyan]")
+    console.print(f"  [bold green]✓[/bold green] MEDIUM → [bright_cyan]{medium_model}[/bright_cyan]")
+    console.print(f"  [bold green]✓[/bold green] HIGH   → [bright_cyan]{high_model}[/bright_cyan]")
+    console.print()
+
+    return low_model, medium_model, high_model
+
+
 # ── Setup Wizard ───────────────────────────────────────────────────────────────
 
 def _show_banner() -> None:
-    banner = Table.grid(padding=(0, 0))
-    banner.add_column(justify="center")
-    banner.add_row("[bold bright_white]Support Triage Agent[/bold bright_white]")
-    banner.add_row("[dim]HackerRank Orchestrate — May 2026[/dim]")
-    banner.add_row("")
-    banner.add_row("[italic]Multi-domain AI support triage for [cyan]HackerRank[/cyan] · [blue]Claude[/blue] · [yellow]Visa[/yellow][/italic]")
+    title = Text()
+    title.append("⚡ ", style="bold yellow")
+    title.append("Support Triage Agent", style="bold bright_white")
+    title.append(" ⚡", style="bold yellow")
+
+    subtitle = Text("HackerRank Orchestrate · May 2026", style="dim cyan", justify="center")
+    tagline = Text(
+        "Multi-domain AI triage  ·  HackerRank  ·  Claude  ·  Visa",
+        style="italic dim",
+        justify="center",
+    )
+
+    content = Group(
+        Align.center(title),
+        Align.center(subtitle),
+        Text(""),
+        Align.center(tagline),
+    )
 
     console.print()
     console.print(Panel(
-        banner,
-        border_style="bright_cyan",
-        padding=(1, 4),
+        content,
+        border_style="bold bright_blue",
+        box=box.DOUBLE_EDGE,
+        padding=(1, 6),
         expand=False,
     ))
     console.print()
@@ -238,10 +334,11 @@ def _show_banner() -> None:
 def _select_provider() -> str:
     table = Table(
         title="Select AI Provider",
-        box=box.SIMPLE_HEAD,
-        title_style="bold",
+        box=box.ROUNDED,
+        title_style="bold bright_white",
         show_header=False,
         padding=(0, 2),
+        border_style="bright_blue",
     )
     table.add_column("Num", style="bold cyan", width=4)
     table.add_column("Provider", style="bold", min_width=20)
@@ -263,43 +360,8 @@ def _select_provider() -> str:
         idx = int(choice) - 1
         if 0 <= idx < len(PROVIDER_KEYS):
             selected = PROVIDER_KEYS[idx]
-            console.print(f"  [green]✓[/green] Selected [bold]{PROVIDER_DEFAULTS[selected]['label']}[/bold]\n")
+            console.print(f"  [bold green]✓[/bold green] Selected [bold]{PROVIDER_DEFAULTS[selected]['label']}[/bold]\n")
             return selected
-
-
-def _select_models(provider: str) -> Tuple[str, str, str]:
-    p = PROVIDER_DEFAULTS[provider]
-    tier_table = Table(
-        title="Model Tier Configuration",
-        box=box.SIMPLE_HEAD,
-        title_style="bold",
-        show_header=False,
-        padding=(0, 2),
-    )
-    tier_table.add_column("Tier", style="bold cyan", min_width=8)
-    tier_table.add_column("Agents", style="dim", min_width=36)
-    tier_table.add_column("Model", style="green", min_width=32)
-
-    tier_table.add_row("LOW", "(Router, Critic, Compressor)", p["low_label"])
-    tier_table.add_row("MEDIUM", "(Triage, Responder)", p["medium_label"])
-    tier_table.add_row("HIGH", "(Responder — high-risk only)", p["high_label"])
-
-    console.print(tier_table)
-
-    use_defaults = Confirm.ask(
-        "  [bold]Use recommended models?[/bold]",
-        default=True,
-    )
-    console.print()
-
-    if use_defaults:
-        return p["low"], p["medium"], p["high"]
-
-    low = Prompt.ask("  LOW model name  ").strip() or p["low"]
-    medium = Prompt.ask("  MEDIUM model name").strip() or p["medium"]
-    high = Prompt.ask("  HIGH model name  ").strip() or p["high"]
-    console.print()
-    return low, medium, high
 
 
 def _collect_api_key(provider: str) -> str:
@@ -318,12 +380,11 @@ def _collect_api_key(provider: str) -> str:
             console.print("  [red]Key cannot be empty. Please try again.[/red]\n")
             continue
 
-        # Validate key
-        with console.status("[dim]Validating API key…[/dim]", spinner="dots"):
+        with console.status("[dim]Validating API key…[/dim]", spinner="aesthetic"):
             error = _validate_api_key(provider, api_key)
 
         if error is None:
-            console.print("  [green]✓ API key validated successfully.[/green]\n")
+            console.print("  [bold green]✓[/bold green] API key validated successfully.\n")
             return api_key
         else:
             console.print(f"  [red]✗ Validation failed:[/red] {error}")
@@ -339,18 +400,19 @@ def _collect_api_key(provider: str) -> str:
 def _select_mode() -> str:
     table = Table(
         title="What would you like to do?",
-        box=box.SIMPLE_HEAD,
-        title_style="bold",
+        box=box.ROUNDED,
+        title_style="bold bright_white",
         show_header=False,
         padding=(0, 2),
+        border_style="cyan",
     )
     table.add_column("Num", style="bold cyan", width=4)
-    table.add_column("Mode", style="bold", min_width=22)
+    table.add_column("Mode", style="bold", min_width=24)
     table.add_column("Description", style="dim")
 
-    table.add_row("1", "Single ticket", "triage one ticket now")
-    table.add_row("2", "Batch CSV", "process support_tickets/support_tickets.csv")
-    table.add_row("3", "Interactive REPL", "type tickets one by one")
+    table.add_row("1", "⚡ Single ticket", "triage one ticket now")
+    table.add_row("2", "📄 Batch CSV", "process support_tickets/support_tickets.csv")
+    table.add_row("3", "💬 Interactive REPL", "type tickets one by one")
 
     console.print(table)
 
@@ -374,28 +436,31 @@ def run_setup_wizard(
 
     Returns (provider, api_key, low_model, medium_model, high_model).
     Skips steps where values are supplied via forced_* arguments.
+    Order: provider → key → models (key is needed for live model fetch).
     """
     _show_banner()
 
-    # Step 2 — Provider
+    # Step 1 — Provider
     if forced_provider and forced_provider.lower() in PROVIDER_KEYS:
         provider = forced_provider.lower()
-        console.print(f"  [green]✓[/green] Provider: [bold]{PROVIDER_DEFAULTS[provider]['label']}[/bold]\n")
+        console.print(f"  [bold green]✓[/bold green] Provider: [bold]{PROVIDER_DEFAULTS[provider]['label']}[/bold]\n")
     else:
         provider = _select_provider()
 
-    # Step 3 — Models
+    # Step 2 — API Key (before models — needed for live model fetch)
+    if forced_key:
+        api_key = forced_key
+        console.print("  [bold green]✓[/bold green] API key supplied via --key flag.\n")
+    else:
+        api_key = _collect_api_key(provider)
+
+    # Step 3 — Fetch models live, then let user select
     if forced_low and forced_medium and forced_high:
         low_model, medium_model, high_model = forced_low, forced_medium, forced_high
     else:
-        low_model, medium_model, high_model = _select_models(provider)
-
-    # Step 4 — API Key
-    if forced_key:
-        api_key = forced_key
-        console.print("  [green]✓[/green] API key supplied via --key flag.\n")
-    else:
-        api_key = _collect_api_key(provider)
+        with console.status("[dim]Fetching available models…[/dim]", spinner="aesthetic"):
+            model_list = _fetch_models(provider, api_key)
+        low_model, medium_model, high_model = _select_models_from_list(provider, model_list)
 
     return provider, api_key, low_model, medium_model, high_model
 
@@ -403,9 +468,15 @@ def run_setup_wizard(
 # ── Execution Modes ────────────────────────────────────────────────────────────
 
 def _build_pipeline(provider: str, api_key: str, low: str, medium: str, high: str):
-    with console.status("[dim]Loading pipeline…[/dim]", spinner="dots"):
+    with console.status(
+        "[dim cyan]Initializing pipeline agents…[/dim cyan]",
+        spinner="bouncingBall",
+        spinner_style="bright_blue",
+    ):
         pipeline = PipelineFactory.create_with_config(provider, api_key, low, medium, high)
-    console.print("  [green]✓[/green] Pipeline ready.\n")
+    console.print(
+        f"  [bold green]✓[/bold green] Pipeline ready — [dim]{provider.title()} · {low[:28]}[/dim]\n"
+    )
     return pipeline
 
 
@@ -427,7 +498,7 @@ def run_single(pipeline, ticket: str = "", company: str = "", subject: str = "")
 
     result: Optional[dict] = None
     state = None
-    with console.status("[dim]Processing ticket…[/dim]", spinner="dots"):
+    with console.status("[dim]Processing ticket…[/dim]", spinner="aesthetic"):
         try:
             result, state = _run_ticket_with_state(pipeline, ticket, company, subject)
         except Exception as exc:
@@ -435,6 +506,7 @@ def run_single(pipeline, ticket: str = "", company: str = "", subject: str = "")
                 f"[red]✗ Error:[/red] {exc}",
                 title="[bold red]Pipeline Error[/bold red]",
                 border_style="red",
+                box=box.ROUNDED,
             ))
             return False
 
@@ -449,6 +521,7 @@ def run_batch(pipeline, input_path: Path, output_path: Path) -> int:
             f"[red]CSV file not found:[/red] {input_path}",
             title="[bold red]Error[/bold red]",
             border_style="red",
+            box=box.ROUNDED,
         ))
         return 1
 
@@ -461,14 +534,14 @@ def run_batch(pipeline, input_path: Path, output_path: Path) -> int:
     console.print(f"  [bold]Processing {total} tickets…[/bold]\n")
 
     with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(bar_width=38),
+        SpinnerColumn("aesthetic"),
+        TextColumn("[progress.description]{task.description}", table_column=Column(ratio=2)),
+        BarColumn(bar_width=None, style="bright_blue", complete_style="bright_green", finished_style="green"),
         TaskProgressColumn(),
         MofNCompleteColumn(),
         TimeElapsedColumn(),
         console=console,
-        transient=False,
+        expand=True,
     ) as progress:
         task = progress.add_task("Triaging…", total=total)
 
@@ -521,13 +594,12 @@ def run_batch(pipeline, input_path: Path, output_path: Path) -> int:
     summary_grid.add_column()
     summary_grid.add_column()
     summary_grid.add_row(
-        f"[bold]Total[/bold]  [cyan]{total}[/cyan]",
+        f"[bold]Total[/bold]  [bright_cyan]{total}[/bright_cyan]",
         f"[bold]Replied[/bold]  [green]{replied}[/green]",
         f"[bold]Escalated[/bold]  [yellow]{escalated}[/yellow]",
         f"[bold]Errors[/bold]  [red]{errors}[/red]",
     )
 
-    from rich.console import Group
     console.print()
     console.print(Panel(
         Group(
@@ -535,8 +607,9 @@ def run_batch(pipeline, input_path: Path, output_path: Path) -> int:
             "",
             Text(f"Output written to: {output_path}", style="dim"),
         ),
-        title="[bold]Batch Complete[/bold]",
-        border_style="bright_blue",
+        title="[bold bright_white]Batch Complete[/bold bright_white]",
+        border_style="green",
+        box=box.ROUNDED,
         padding=(1, 2),
     ))
     return 0
@@ -545,8 +618,9 @@ def run_batch(pipeline, input_path: Path, output_path: Path) -> int:
 def run_interactive(pipeline) -> int:
     """Interactive REPL — type tickets one by one."""
     console.print(Panel(
-        "[bold]Interactive REPL[/bold]\nType [cyan]exit[/cyan] or press [bold]Ctrl-C[/bold] to quit.",
-        border_style="bright_cyan",
+        "[bold]Interactive REPL[/bold]\nType [bright_cyan]exit[/bright_cyan] or press [bold]Ctrl-C[/bold] to quit.",
+        border_style="cyan",
+        box=box.ROUNDED,
         padding=(0, 2),
     ))
     console.print()
@@ -572,7 +646,7 @@ def run_interactive(pipeline) -> int:
             return 0
 
         console.print()
-        with console.status("[dim]Processing ticket…[/dim]", spinner="dots"):
+        with console.status("[dim]Processing ticket…[/dim]", spinner="aesthetic"):
             try:
                 result, state = _run_ticket_with_state(pipeline, ticket, company, subject)
             except Exception as exc:
@@ -580,6 +654,7 @@ def run_interactive(pipeline) -> int:
                     f"[red]✗ Error:[/red] {exc}",
                     title="[bold red]Pipeline Error[/bold red]",
                     border_style="red",
+                    box=box.ROUNDED,
                 ))
                 continue
 
@@ -664,6 +739,7 @@ def main() -> int:
             f"[red]Failed to initialise pipeline:[/red] {exc}",
             title="[bold red]Startup Error[/bold red]",
             border_style="red",
+            box=box.ROUNDED,
         ))
         return 1
 

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# triage — HackerRank Support Triage Agent
+# Works whether called directly or via symlink.
+
+REAL_SCRIPT="$(python3 -c "import os,sys; print(os.path.realpath('${BASH_SOURCE[0]}'))")"
+REPO_DIR="$(dirname "$(dirname "$REAL_SCRIPT")")"
+
+exec python3 "$REPO_DIR/code/cli.py" "$@"
