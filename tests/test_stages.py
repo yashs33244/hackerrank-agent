@@ -278,47 +278,45 @@ def _state_for_adjudication() -> ClaimState:
     return state
 
 
-def test_adjudicate_builds_draft():
+def test_adjudicate_compares_attributes():
     payload = {
-        "evidence_standard_met": True,
-        "evidence_standard_met_reason": "The rear bumper is visible.",
-        "risk_flags": ["none"],
-        "issue_type": "dent",
-        "object_part": "rear_bumper",
-        "claim_status": "supported",
-        "claim_status_justification": "img_1 shows a dent on the rear bumper.",
-        "supporting_image_ids": ["img_1"],
-        "valid_image": True,
-        "severity": "medium",
+        "object_cmp": "match",
+        "part_cmp": "match",
+        "issue_cmp": "different_issue",
+        "severity_cmp": "mismatch",
+        "supporting_image_id": "img_1",
+        "falsifies_claim": True,
     }
     client = FakeClient(json_payload=payload)
     state = _state_for_adjudication()
 
-    draft = adjudicate_mod.adjudicate(state, client=client)
+    result = adjudicate_mod.compare_attributes(state.claim, state.images, client)
 
-    assert isinstance(draft, dict)
-    assert draft["claim_status"] == "supported"
-    assert draft["issue_type"] == "dent"
-    assert draft["object_part"] == "rear_bumper"
-    assert draft["supporting_image_ids"] == ["img_1"]
-    assert draft["severity"] == "medium"
+    assert result["issue_cmp"] == "different_issue"
+    assert result["object_cmp"] == "match"
+    assert result["falsifies_claim"] is True
     # Adjudication is text-only: never pass image paths to the model.
     assert client.calls[0]["image_paths"] is None
 
 
-def test_adjudicate_error_yields_nei_safe_default():
+def test_adjudicate_out_of_vocab_token_clamped_to_unknown():
+    client = FakeClient(json_payload={"issue_cmp": "totally_made_up"})
+    state = _state_for_adjudication()
+
+    result = adjudicate_mod.compare_attributes(state.claim, state.images, client)
+
+    assert result["issue_cmp"] == "unknown"
+
+
+def test_adjudicate_error_yields_empty_dict():
     client = FakeClient(raise_error=True)
     state = _state_for_adjudication()
 
-    draft = adjudicate_mod.adjudicate(state, client=client)
+    result = adjudicate_mod.compare_attributes(state.claim, state.images, client)
 
-    assert isinstance(draft, dict)
-    # Safe, conservative default: abstain and route to manual review.
-    assert draft["claim_status"] == "not_enough_information"
-    assert draft["supporting_image_ids"] == []
-    assert draft["severity"] == "unknown"
-    assert draft["evidence_standard_met"] is False
-    assert "manual_review_required" in draft["risk_flags"]
+    # On failure, return an empty dict so the decision tree falls back to its
+    # deterministic facts-only logic (S3 can only help, never break, a row).
+    assert result == {}
 
 
 # --------------------------------------------------------------------------- #

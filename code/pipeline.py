@@ -120,6 +120,11 @@ def process_claim(
         claim_input.claim_object, claim.claimed_issue or claim.claimed_part, rules
     )
     history = history_map.get(claim_input.user_id)
+    # NOTE: the S3 per-attribute adjudication (agent.adjudicate.compare_attributes)
+    # is implemented and the decision tree accepts it, but it is intentionally NOT
+    # wired here: measured on the sample it did not improve contradicted-recall
+    # (our perception is claim-aware, so S3 inherits the same bias the research
+    # design assumed claim-blind facts would avoid). Kept as documented future work.
     output = decide(claim, images, rule, history)
     raw = {
         "user_id": claim_input.user_id,

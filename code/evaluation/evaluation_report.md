@@ -8,29 +8,42 @@ The 44 `dataset/claims.csv` rows are unlabeled; we never tune against them.
 
 | Metric | Value |
 |---|---|
-| `claim_status` accuracy | **0.85** (17/20) |
-| `claim_status` Wilson 95% CI | **[0.64, 0.95]** |
-| Stratified 5-fold mean +/- std | **0.833 +/- 0.139** |
+| `claim_status` accuracy | **0.80-0.85** (16-17/20 across runs) |
+| `claim_status` Wilson 95% CI | **~[0.58, 0.92]** |
+| Stratified 5-fold mean +/- std | **~0.80 +/- 0.13** |
 
-At n=20 the point estimate is necessarily imprecise (Wilson width ~30 points); it
-is a regression guard, not a forecast. The fold spread (0.139) mostly reflects how
-few rows each fold holds (4 each), so the per-row LOOCV view and the Wilson
-interval are the steadier reads. `supported` is recovered perfectly (13/13) and
-NEI is 2/2; the remaining misses are contradicted-recall (2/5).
+Two sources of imprecision, reported transparently: (1) at n=20 the Wilson interval
+is ~30 points wide; (2) the vision calls are **not temperature-zero** (the Claude
+Code CLI exposes no temperature flag), so `claim_status` moves by about one row
+(0.80-0.85) between fresh runs. The **content-hash cache pins per-image facts so a
+given `output.csv` reproduces exactly** - the cache, not temperature, is our
+reproducibility mechanism. The number is a regression guard, not a forecast.
+`supported` is recovered perfectly (13/13) and NEI is 2/2; the residual gap is
+contradicted-recall.
 
 ## 2. Per-column accuracy (sample)
 
 | Column | Accuracy |
 |---|---|
 | `claim_object` (echoed) | 1.00 |
-| `claim_status` | 0.85 |
-| `object_part` | 0.80 |
-| `issue_type` | 0.75 |
+| `claim_status` | 0.80 |
+| `object_part` | 0.75 |
+| `issue_type` | 0.70 |
 | `severity` | 0.70 |
 | `evidence_standard_met` | 0.95 |
 | `valid_image` | 0.80 |
-| `risk_flags` (multi-label micro-F1) | 0.56 |
+| `risk_flags` (multi-label micro-F1) | **0.62** (was 0.56) |
 | `supporting_image_ids` (set exact / Jaccard) | 0.70 / 0.83 |
+
+Two changes from the accuracy-research pass (`research/10`): (1) a **quality-flag
+clarity gate** - a quality risk flag is surfaced only from an image the model
+marked not clear enough, or on a not_enough_information row - lifted `risk_flags`
+micro-F1 from 0.56 to 0.62 (it cut `cropped_or_obstructed` false positives from 8
+to ~2). (2) A per-attribute **S3 adjudication** call (`agent/adjudicate.py`) was
+implemented and tested but, measured on the sample, **did not improve
+contradicted-recall** (our perception is claim-aware, so the adjudicator inherits
+the same bias the research design assumed claim-blind facts would avoid); it is
+kept as documented future work, not wired into the active path.
 
 ### claim_status confusion (rows = gold, cols = predicted)
 

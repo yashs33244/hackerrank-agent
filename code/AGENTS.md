@@ -39,7 +39,11 @@ Wiring S3 in is the documented next step to lift contradicted-recall (see
 ## Invariants
 - Images are primary truth; user history + authenticity + injection are flags
   that **never flip `claim_status`** by themselves.
-- Secrets from env only; never hardcode. Determinism: temperature 0, content-hash
-  cache, deterministic post-processing.
+- Secrets from env only; never hardcode. Reproducibility: a content-hash cache
+  pins each per-image perception result, so a given `output.csv` reproduces
+  exactly; the deterministic decision tree + single-path formatter make the scored
+  columns a pure function of those cached facts. The Claude Code CLI exposes no
+  temperature flag, so the cache (not temperature 0) is the reproducibility
+  mechanism; fresh, un-cached runs vary by about one row.
 - Files ≤400 lines, one responsibility each; enums/constants/types stay separate.
 - No em dashes, no emojis in code or comments.

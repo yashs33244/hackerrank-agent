@@ -68,6 +68,7 @@ def decide(
     images: list[ImageFact],
     evidence_rule: EvidenceRule | None,
     history: UserHistory | None,
+    adjudication: dict | None = None,
 ) -> ClaimOutput:
     """Adjudicate one claim row into the ten scored output columns.
 
@@ -105,7 +106,9 @@ def decide(
         evidence_standard_met = False
     else:
         status, issue_type, object_part, severity, supporting_ids = (
-            _resolve_visible_part(supporting_image, claim, images, flags)
+            _resolve_visible_part(
+                supporting_image, claim, images, flags, adjudication
+            )
         )
         # Coverage is met when the part was judgeable. A missing-item row that
         # falls through to not_enough_information here did not meet the standard.
@@ -207,6 +210,7 @@ def _resolve_visible_part(
     claim: ExtractedClaim,
     images: list[ImageFact],
     flags: set[str],
+    adjudication: dict | None = None,
 ) -> tuple[str, str, str, str, list[str]]:
     """The claimed part is visible; decide supported vs contradicted (D9 yes).
 
@@ -215,8 +219,9 @@ def _resolve_visible_part(
     severity=none; (3) damage != claim -> contradicted, claim_mismatch;
     (4) damage matches -> supported.
     """
-    # Flag quality issues on secondary shots even when a clear image decided.
-    _collect_quality_flags(images, flags)
+    # Surface quality issues only from images that were not clear enough; a clean
+    # verdict should not carry noise quality flags (gate_on_clarity precision fix).
+    _collect_quality_flags(images, flags, gate_on_clarity=True)
 
     if not _objects_match(supporting_image.shown_object, claim.claimed_object):
         flags.add(RiskFlag.WRONG_OBJECT.value)
@@ -275,6 +280,20 @@ def _resolve_visible_part(
             supporting_ids,
         )
 
+    # (3b) The S3 adjudication caught an issue-level contradiction the facts alone
+    # miss: a clearly DIFFERENT kind of damage on the matching part (dent claimed,
+    # only a scratch shown). The deterministic tree cannot judge issue semantics,
+    # so it defers to S3's explicit comparison here (research/10).
+    if adjudication and adjudication.get("issue_cmp") == "different_issue":
+        flags.add(RiskFlag.CLAIM_MISMATCH.value)
+        return (
+            ClaimStatus.CONTRADICTED.value,
+            _clamp_issue_type(supporting_image.issue_guess),
+            object_part,
+            _clamp_severity(supporting_image.severity_guess),
+            supporting_ids,
+        )
+
     # (4) Damage present on the claimed part -> the claim of damage is
     # corroborated -> supported. A differing damage WORD (dent vs broken_part) is
     # not a contradiction. issue_type and severity lean to the user's claim, which
@@ -321,9 +340,20 @@ def _supporting_image_ids(
     return keep_ids
 
 
-def _collect_quality_flags(images: list[ImageFact], flags: set[str]) -> None:
-    """Add any reported per-image quality issue that is a legal RiskFlag."""
+def _collect_quality_flags(
+    images: list[ImageFact], flags: set[str], *, gate_on_clarity: bool = False
+) -> None:
+    """Surface legal quality risk flags from the images.
+
+    With ``gate_on_clarity`` True (the supported/contradicted path) only flags from
+    an image the model marked NOT clear enough are surfaced: a quality issue that
+    did not impair a confident verdict is noise that tanks precision (measured:
+    cropped_or_obstructed was 8 FP). With the gate off (the not_enough_information
+    path) every quality issue is surfaced, because there it is exactly what
+    explains the abstention (case_006 wrong_angle, case_018 cropped)."""
     for image in images:
+        if gate_on_clarity and image.is_clear_enough:
+            continue
         for quality_issue in image.quality_issues:
             if quality_issue in _QUALITY_RISK_FLAGS:
                 flags.add(quality_issue)

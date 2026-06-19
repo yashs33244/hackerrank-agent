@@ -63,8 +63,9 @@ Each subfolder has its own `AGENTS.md` describing its job and invariants.
 
 ## Results (sample, n=20)
 
-`claim_status` 0.85 (Wilson 95% CI [0.64, 0.95], stratified 5-fold 0.833 +/- 0.139),
-`object_part` 0.80, `issue_type` 0.75, `evidence_standard_met` 0.95. Full metrics,
+`claim_status` ~0.80-0.85 (Wilson 95% CI ~[0.58, 0.92]; varies ~1 row per run since
+the vision calls are not temperature-zero), `object_part` 0.75, `risk_flags` F1 0.62,
+`evidence_standard_met` 0.95. Full metrics,
 the >=2-strategy comparison, the operational/cost analysis, and the n=20
 methodology are in [`evaluation/evaluation_report.md`](evaluation/evaluation_report.md).
 
