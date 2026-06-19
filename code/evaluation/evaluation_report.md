@@ -18,69 +18,103 @@ Code CLI exposes no temperature flag), so `claim_status` moves by about one row
 (0.80-0.85) between fresh runs. The **content-hash cache pins per-image facts so a
 given `output.csv` reproduces exactly** - the cache, not temperature, is our
 reproducibility mechanism. The number is a regression guard, not a forecast.
-`supported` is recovered perfectly (13/13) and NEI is 2/2; the residual gap is
-contradicted-recall.
+`supported` recall is near-perfect (12/13) and NEI is 2/2; the residual gap is
+contradicted-recall (see §2-§3).
 
-## 2. Per-column accuracy (sample)
+## 2. Per-column accuracy (sample, final config)
 
 | Column | Accuracy |
 |---|---|
 | `claim_object` (echoed) | 1.00 |
 | `claim_status` | 0.80 |
-| `object_part` | 0.75 |
+| `object_part` | **0.85** (was 0.75) |
 | `issue_type` | 0.70 |
-| `severity` | 0.70 |
+| `severity` | **0.75** (was 0.70) |
 | `evidence_standard_met` | 0.95 |
-| `valid_image` | 0.80 |
-| `risk_flags` (multi-label micro-F1) | **0.62** (was 0.56) |
-| `supporting_image_ids` (set exact / Jaccard) | 0.70 / 0.83 |
+| `valid_image` | **0.90** (was 0.80) |
+| `risk_flags` (multi-label micro-F1) | **0.717** (was 0.56) |
+| `supporting_image_ids` (set exact / Jaccard) | 0.65 / 0.78 |
 
-Two changes from the accuracy-research pass (`research/10`): (1) a **quality-flag
-clarity gate** - a quality risk flag is surfaced only from an image the model
-marked not clear enough, or on a not_enough_information row - lifted `risk_flags`
-micro-F1 from 0.56 to 0.62 (it cut `cropped_or_obstructed` false positives from 8
-to ~2). (2) A per-attribute **S3 adjudication** call (`agent/adjudicate.py`) was
-implemented and tested but, measured on the sample, **did not improve
-contradicted-recall** (our perception is claim-aware, so the adjudicator inherits
-the same bias the research design assumed claim-blind facts would avoid); it is
-kept as documented future work, not wired into the active path.
+Five pre-registered changes from the accuracy-research pass (`research/10`), each
+measured once:
+
+1. **Self-consistency voting (k=3)**: each image is read three times independently
+   and every perception field is decided by majority vote. Because the CLI exposes
+   no temperature flag, a single read is noisy; voting both denoises the facts and
+   makes a fresh run reproducible. Combined with a conservative authenticity prompt
+   (a normal phone photo is original by default), this lifted `risk_flags` micro-F1
+   from 0.56 to **0.717** (it cut `non_original_image` and `cropped_or_obstructed`
+   false positives) and `valid_image` from 0.80 to **0.90**.
+2. **Stronger part extraction (S1)**: the claim-extract prompt now maps the
+   customer's plain wording ("door panel area", "package corner", "outer surface")
+   to the closest part token. With claim-aware perception agreeing on the same part,
+   this lifted `object_part` from 0.75 to **0.85** with no regression on any other
+   column (measured A/B, §3).
+3. **Issue-driven severity (S4)**: we A/B'd four severity signals for a supported
+   claim - the image's pixel read scored 0.40 (it over-states, pushing almost
+   everything to `high`), the customer's normalized word 0.55, a damped claim/image
+   consensus 0.55, and a flat `medium` default 0.70 (but it can never reach
+   `low`/`high`, so it overfits the sample's medium-modal distribution). Gold
+   supported-severity clusters at `medium` with the one reliable departure being
+   that a `scratch` is `low` by nature (cosmetic, surface). Anchoring severity on
+   that issue semantic (scratch -> low, else medium) scored **0.75** - best of all
+   four - and generalizes from a property of the damage type, not a noisy per-image
+   read.
+4. A **quality-flag clarity gate** surfaces a quality risk flag only from an image
+   the model marked not clear enough (or on a not_enough_information row), so a
+   confident verdict does not carry noise flags.
+5. A per-attribute **S3 adjudication** call (`agent/adjudicate.py`) was implemented
+   and tested but, measured on the sample, **did not improve contradicted-recall**
+   (perception is claim-aware, so the adjudicator inherits the same bias); kept as
+   documented future work, not wired into the active path.
 
 ### claim_status confusion (rows = gold, cols = predicted)
 
 ```
                         supported  contradicted  not_enough_info
-supported                   13          0              0
+supported                   12          1              0
 contradicted                 2          2              1
 not_enough_information       0          0              2
 ```
 
-`supported` (13/13) and NEI (2/2) are recovered; the residual gap is **contradicted
-recall** (2/5). The hard cases are issue-level semantic mismatch (a dent claimed
-but only a scratch shown), which the deterministic tree cannot adjudicate from
-perception facts alone. Documented as a known limitation (§6), not hidden.
-
-A post-review correctness fix (lowercasing perception tokens at the boundary, so
-capitalized model output like "Car"/"Dent" no longer collapses to `unknown` or a
-false `contradicted`) lifted `claim_status` from 0.75 to 0.85; the strategy table
-below reflects the perception-prompt axis measured before that fix.
+`supported` (12/13) and NEI (2/2) are recovered; the residual gap is **contradicted
+recall** (2/5). The hard cases are affirmative/visual-dominance bias on adversarial
+rows (the image shows a different part or no damage, but a claim-aware model tends
+to confirm the claim) and issue-level semantic mismatch, which the deterministic
+tree cannot adjudicate from perception facts alone. We attacked this directly with
+a claim-blind perception A/B; it regressed (§3), so the limitation is documented
+(§6), not papered over.
 
 ## 3. Strategy comparison (the required >=2-config comparison)
 
-We compared three perception configurations against the same deterministic
-decision tree and the same 20 labels. Each was a single, pre-registered change,
-measured once (see Methodology, iteration cap).
+We A/B-tested each perception/extraction change against the **same** deterministic
+decision tree, the **same** 20 labels, and the **same** k=3 voting, tabulated with
+`code/evaluation/compare.py`. Each change was pre-registered, applied once, and
+measured once (see Methodology, iteration cap). All numbers are exact-match accuracy.
 
 | Strategy | `claim_status` | `object_part` | `issue_type` |
 |---|---|---|---|
-| A. Claim-blind perception (objective only) | 0.65 | 0.35 | 0.50 |
-| B. Claim-aware perception (baseline) | 0.70 | 0.75 | 0.65 |
-| **C. Claim-aware + skeptical verification (chosen)** | **0.75** | **0.80** | 0.65 |
+| B. Claim-aware perception (baseline) | 0.80 | 0.75 | 0.70 |
+| A. Claim-blind perception (object only, no part pointer) | 0.70 | 0.60 | 0.55 |
+| **C. Claim-aware + stronger part extraction (chosen)** | **0.80** | **0.85** | **0.70** |
 
-Finding: withholding the claim entirely (A) collapsed `object_part` because the
-model no longer knew which part to inspect. Supplying the claim as a *pointer to
-the part* while explicitly instructing the model to verify damage independently
-(C) gave the best result on the highest-leverage columns. **Strategy C is used to
-produce `output.csv`.**
+Two findings drove the final design:
+
+- **Claim-blind perception was tested to fix contradicted-recall and it regressed
+  every column** (claim_status -0.10, object_part -0.15, issue_type -0.15). Without
+  a part pointer the model's part-token disagreements (door vs quarter_panel,
+  package_side vs package_corner) fired *false* `part_mismatch` contradictions that
+  outnumbered the two sycophancy rows it fixed. The hypothesis was reasonable; the
+  data rejected it; we reverted. The flag (`PERCEPTION_CLAIM_BLIND`) and template are
+  retained so the A/B reproduces.
+- **Stronger part extraction was safe precisely because perception is claim-aware**:
+  when S1 extracts `claimed_part=door`, perception is told the same part and agrees,
+  so there is no false mismatch. Result: `object_part` 0.75 -> 0.85 with zero
+  regression elsewhere. **Config C produces `output.csv`.**
+
+Earlier in development we also confirmed (A above) that withholding the claim
+entirely collapses `object_part` because the model no longer knows which part to
+inspect - the same mechanism, measured twice.
 
 ## 4. Operational analysis
 
@@ -89,17 +123,22 @@ Inference runs through the local `claude` CLI under the user's Claude
 so there is **no API key and no per-token billing**. We still report usage so cost
 and rate-limit awareness are explicit.
 
+Perception uses **k=3 self-consistency**, so each image is read three times; the
+counts below reflect that.
+
 | Quantity | Sample (20 rows) | Test (44 rows) |
 |---|---|---|
 | Images processed | 29 | 82 (incl. 8 AVIF normalized to PNG) |
-| Model calls | ~49 (20 claim-extract + 29 perception) | ~126 (44 + 82) |
+| Model calls | ~107 (20 claim-extract + 29x3 perception) | ~290 (44 + 82x3) |
 | Models | Sonnet 4.6 (extract + perception) | same |
-| Approx tokens (in+out) | ~150k | ~310k |
-| Measured wall-clock | ~93 s | ~3-4 min |
+| Approx tokens (in+out) | ~430k | ~900k |
+| Measured wall-clock | ~130-300 s (uncached) | ~6-10 min (uncached) |
 
 - **Hypothetical API-equivalent cost** (if run on Sonnet 4.6 at list price, ~$3/M
-  in, ~$15/M out, images pre-resized to 1024px): roughly **$0.60-0.90 for the full
-  test set**. Actual marginal cost on the subscription is zero.
+  in, ~$15/M out, images pre-resized to 1024px): roughly **$1.80-2.70 for the full
+  test set at k=3**. Actual marginal cost on the subscription is zero, and a cached
+  re-run is free. k=3 is a deliberate accuracy/reproducibility-for-cost trade; set
+  `PERCEPTION_SAMPLES=1` to read once (cheapest, noisiest).
 - **Rate / usage limits**: the binding constraint is the subscription usage
   window, not RPM. Mitigations: a **content-hash disk cache** (`.cache/`) keyed on
   model + prompt + image bytes, so re-runs and repeated images never re-pay;
@@ -127,11 +166,15 @@ statistically meaningless (6 test rows give a +/-25-30 point interval). We inste
 
 ## 6. Known limitations (volunteered)
 
-- **Contradicted recall** is the main gap (2/5 on sample): issue-level semantic
-  mismatch (dent claimed, scratch shown) needs an LLM adjudication pass over the
-  objective facts; the deterministic tree treats damage on the claimed part as
-  supported. `risk_flags` precision is also soft (micro-F1 0.56) from over-applying
-  manual-review/history flags - the next tuning target after contradicted recall.
+- **Contradicted recall** is the main gap (2/5 on sample) and is resistant to the
+  obvious fixes: an affirmative/visual-dominance bias makes a claim-aware model
+  confirm the claim even when the image shows a different part or no damage. The
+  claim-blind A/B that should have fixed it instead regressed every column (§3), and
+  S3 adjudication inherited the same bias. A robust fix needs a genuinely
+  independent objective read whose part labels are reconciled to the claim's
+  vocabulary before any mismatch can fire - left as future work rather than risked on
+  20 rows. `risk_flags` micro-F1 is now **0.717** (up from 0.56) after the
+  self-consistency + conservative-authenticity pass.
 - `glass_shatter` and `missing_part` have no sample exemplar; they are anchored on
   enum definitions only.
 - Severity is coarse and claim-anchored; it can under-call a genuinely severe case

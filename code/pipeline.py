@@ -95,7 +95,9 @@ def _perceive_row_images(
             )
         except (ImageNormalizationError, FileNotFoundError, OSError):
             usable_path = source_path  # fall back to original; Read may still cope
-        fact = perceive_image(str(usable_path), image_id, claim, client)
+        fact = perceive_image(
+            str(usable_path), image_id, claim, client, samples=config.PERCEPTION_SAMPLES
+        )
         fact.path = str(source_path)
         _augment_authenticity(fact, source_path)
         facts.append(fact)

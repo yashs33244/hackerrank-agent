@@ -99,3 +99,35 @@ CLAUDE_TIMEOUT_S: int = _env_int("CLAUDE_TIMEOUT_S", 180)
 # Longest edge images are resized to before a vision call (cuts vision tokens
 # roughly in half). Pure data here; the resize itself lives in images/.
 IMAGE_MAX_EDGE: int = _env_int("IMAGE_MAX_EDGE", 1024)
+
+# Independent reads per image, majority-voted (self-consistency). Vision calls are
+# not temperature-zero, so >1 denoises the per-image facts and makes the result
+# reproducible. Set to 1 to disable voting (cheapest, noisiest).
+PERCEPTION_SAMPLES: int = _env_int("PERCEPTION_SAMPLES", 3)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Read a boolean env var (``1/true/yes`` true; ``0/false/no`` false),
+    falling back to ``default`` on absence or an unrecognized value."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    token = raw.strip().lower()
+    if token in {"1", "true", "yes", "on"}:
+        return True
+    if token in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+# Claim-blind perception (S2). When True, the perception model is NOT told what the
+# user claimed; it scans the whole object and reports the damage it actually sees.
+# Intended to curb the affirmative/visual-dominance bias where a claim-aware model
+# confirms the claimed damage even when the image shows something different.
+#
+# MEASURED (sample, k=3): claim-blind regressed every column (claim_status
+# 0.80->0.70, object_part 0.75->0.60, issue_type 0.70->0.55). Without a part
+# pointer, the model's part-token disagreements fired false part_mismatch
+# contradictions that outnumbered the two sycophancy rows it fixed. So the default
+# is claim-AWARE; the flag is retained for reproducibility of that A/B, not for use.
+PERCEPTION_CLAIM_BLIND: bool = _env_bool("PERCEPTION_CLAIM_BLIND", False)
