@@ -40,3 +40,8 @@ scripts/improve_checkpoints/
 # log files (outside repo by design, but belt-and-suspenders)
 *.log
 hackerrank_orchestrate/
+.cache/
+log.txt
+/code/**/__pycache__/
+*.egg-info/
+sample_output.csv

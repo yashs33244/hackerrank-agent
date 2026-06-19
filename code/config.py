@@ -1,102 +1,101 @@
-"""Centralized configuration — single source of truth for all settings.
+"""Centralized configuration for the Multi-Modal Evidence Review solution.
 
-All environment variables are loaded and typed here. No other module
-reads os.getenv() directly. Import from this module instead.
+Single source of truth for filesystem paths, model routing, and runtime tunables.
+Every value is overridable through an environment variable so the same code runs
+unchanged on a grader's machine, in CI, or locally. Nothing here performs I/O or
+spawns a process; importing this module must stay cheap and side-effect free.
 
-Usage:
-    from config import settings
-    model = settings.model_low
+No API key is ever read here: inference runs through the installed ``claude`` CLI
+under the user's subscription (see AGENTS.md s6 and research/06_self_grill.md D1).
 """
+
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
 from pathlib import Path
 
-from dotenv import load_dotenv
+# ---------------------------------------------------------------------------
+# Paths (resolved from this file, never hardcoded to a user's home directory)
+# ---------------------------------------------------------------------------
 
-# Load .env relative to repo root (two levels up from code/)
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-load_dotenv(_REPO_ROOT / ".env")
+# code/config.py -> code/ -> repo root.
+REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 
+DATASET_DIR: Path = Path(
+    os.environ.get("DATASET_DIR", str(REPO_ROOT / "dataset"))
+).resolve()
 
-@dataclass(frozen=True)
-class ModelConfig:
-    low: str
-    medium: str
-    high: str
+# Image roots. The dataset ships sample and test image trees side by side.
+IMAGES_DIR: Path = Path(
+    os.environ.get("IMAGES_DIR", str(DATASET_DIR / "images"))
+).resolve()
+SAMPLE_IMAGES_DIR: Path = IMAGES_DIR / "sample"
+TEST_IMAGES_DIR: Path = IMAGES_DIR / "test"
 
+# Disk cache so re-runs and repeated images never re-pay a model call.
+CACHE_DIR: Path = Path(
+    os.environ.get("CACHE_DIR", str(REPO_ROOT / ".cache"))
+).resolve()
 
-@dataclass(frozen=True)
-class RetrievalConfig:
-    bm25_top_k: int
-    semantic_top_k: int
-    final_top_k: int
-    embedding_model: str
+# Normalized images (AVIF/WebP converted to PNG) are cached here, mirroring the
+# source tree so identical filenames in different cases never collide.
+NORMALIZED_DIR: Path = CACHE_DIR / "normalized"
 
-
-@dataclass(frozen=True)
-class PipelineConfig:
-    max_responder_calls: int
-    critic_pass_threshold: int
-
-
-@dataclass(frozen=True)
-class PathConfig:
-    repo_root: Path
-    data_dir: Path
-    index_dir: Path
-    prompts_dir: Path
-    input_csv: Path
-    output_csv: Path
-    sample_csv: Path
+# Dataset CSV files and the output target.
+CLAIMS_CSV: Path = DATASET_DIR / "claims.csv"
+SAMPLE_CLAIMS_CSV: Path = DATASET_DIR / "sample_claims.csv"
+USER_HISTORY_CSV: Path = DATASET_DIR / "user_history.csv"
+EVIDENCE_REQUIREMENTS_CSV: Path = DATASET_DIR / "evidence_requirements.csv"
+OUTPUT_CSV: Path = Path(
+    os.environ.get("OUTPUT_CSV", str(REPO_ROOT / "output.csv"))
+).resolve()
 
 
-@dataclass(frozen=True)
-class Settings:
-    """Immutable settings object — frozen after construction."""
-    api_key: str
-    models: ModelConfig
-    retrieval: RetrievalConfig
-    pipeline: PipelineConfig
-    paths: PathConfig
+# ---------------------------------------------------------------------------
+# Model routing (per-stage; see research/07_eng_review.md s1)
+# ---------------------------------------------------------------------------
+
+# Bulk per-image perception (S2): cheap, high-volume vision calls.
+MODEL_PERCEPTION: str = os.environ.get("MODEL_PERCEPTION", "claude-sonnet-4-6")
+
+# Adjudication (S3) and the ~7 hard rows: the strongest reasoning model.
+MODEL_ADJUDICATION: str = os.environ.get("MODEL_ADJUDICATION", "claude-opus-4-8")
+
+# Critic / validator (S5): cheapest model, optional corrective pass.
+MODEL_CRITIC: str = os.environ.get("MODEL_CRITIC", "claude-haiku-4-5")
+
+# Claim extraction (S1): one cheap multilingual text call per row.
+MODEL_CLAIM_EXTRACT: str = os.environ.get("MODEL_CLAIM_EXTRACT", "claude-sonnet-4-6")
 
 
-def _load_settings() -> Settings:
-    api_key = os.getenv("GEMINI_API_KEY", "")
-
-    repo_root = _REPO_ROOT
-    code_dir = Path(__file__).resolve().parent
-    index_dir = code_dir / "index" / "data"
-
-    return Settings(
-        api_key=api_key,
-        models=ModelConfig(
-            low=os.getenv("MODEL_LOW", "models/gemini-3.1-flash-lite-preview"),
-            medium=os.getenv("MODEL_MEDIUM", "models/gemini-3-flash-preview"),
-            high=os.getenv("MODEL_HIGH", "models/gemini-3.1-pro-preview"),
-        ),
-        retrieval=RetrievalConfig(
-            bm25_top_k=int(os.getenv("BM25_TOP_K", "20")),
-            semantic_top_k=int(os.getenv("SEMANTIC_TOP_K", "5")),
-            final_top_k=int(os.getenv("FINAL_TOP_K", "3")),
-            embedding_model=os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-001"),
-        ),
-        pipeline=PipelineConfig(
-            max_responder_calls=int(os.getenv("MAX_RESPONDER_CALLS", "3")),
-            critic_pass_threshold=int(os.getenv("CRITIC_PASS_THRESHOLD", "7")),
-        ),
-        paths=PathConfig(
-            repo_root=repo_root,
-            data_dir=repo_root / "data",
-            index_dir=index_dir,
-            prompts_dir=code_dir / "prompts",
-            input_csv=repo_root / "support_tickets" / "support_tickets.csv",
-            output_csv=repo_root / "support_tickets" / "output.csv",
-            sample_csv=repo_root / "support_tickets" / "sample_support_tickets.csv",
-        ),
-    )
+# ---------------------------------------------------------------------------
+# Runtime tunables
+# ---------------------------------------------------------------------------
 
 
-# Module-level singleton — import this everywhere
-settings: Settings = _load_settings()
+def _env_int(name: str, default: int) -> int:
+    """Read an integer env var, falling back to ``default`` on absence or
+    malformed value. We never crash the whole run on a typo'd override."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+# Bounded concurrency for the parallel S2 perception subprocesses. Kept modest
+# so we stay polite to the subscription usage window.
+MAX_CONCURRENCY: int = _env_int("MAX_CONCURRENCY", 6)
+
+# Path to the Claude Code binary. Default assumes it is on PATH.
+CLAUDE_BIN: str = os.environ.get("CLAUDE_BIN", "claude")
+
+# Per-call subprocess timeout in seconds. A single headless call (including
+# image Reads) must finish within this budget or it is retried.
+CLAUDE_TIMEOUT_S: int = _env_int("CLAUDE_TIMEOUT_S", 180)
+
+# Longest edge images are resized to before a vision call (cuts vision tokens
+# roughly in half). Pure data here; the resize itself lives in images/.
+IMAGE_MAX_EDGE: int = _env_int("IMAGE_MAX_EDGE", 1024)

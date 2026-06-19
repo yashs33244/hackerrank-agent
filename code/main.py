@@ -1,90 +1,54 @@
-"""Entry point — reads support_tickets.csv, runs pipeline, writes output.csv.
+"""Entry point for the Multi-Modal Evidence Review system.
 
-Usage:
-    cd code
-    python main.py
+Examples:
+    python code/main.py                 # full test set (dataset/claims.csv) -> output.csv
+    python code/main.py --sample        # 20 labeled rows -> sample_output.csv
+    python code/main.py --limit 3       # first 3 rows only (quick smoke run)
 
-Output: support_tickets/output.csv (relative to repo root)
+No API key is used: inference runs through the local ``claude`` CLI under the
+user's Claude subscription (see AGENTS.md and code/agent/client.py).
 """
+
 from __future__ import annotations
 
-import csv
+import argparse
 import sys
 import time
 from pathlib import Path
-from typing import List
 
-from config import settings
-from domain.types import TicketState
-from pipeline import PipelineFactory
+# Make code/ the import root so bare package imports (config, pipeline, domain.*)
+# resolve identically however this script is launched.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-_OUTPUT_FIELDNAMES = [
-    "status",
-    "product_area",
-    "response",
-    "justification",
-    "request_type",
-]
+import config  # noqa: E402
+from pipeline import run  # noqa: E402
 
 
-def _read_tickets(path: Path) -> List[dict]:
-    with path.open(encoding="utf-8") as fh:
-        return list(csv.DictReader(fh))
+def main(argv: list[str] | None = None) -> None:
+    """Parse arguments and run the pipeline over the chosen claims file."""
+    parser = argparse.ArgumentParser(description="Multi-Modal Evidence Review")
+    parser.add_argument("--claims", default=None, help="claims CSV (default dataset/claims.csv)")
+    parser.add_argument("--output", default=None, help="output CSV (default output.csv)")
+    parser.add_argument(
+        "--sample", action="store_true", help="run the 20 labeled sample rows"
+    )
+    parser.add_argument("--limit", type=int, default=None, help="process only the first N rows")
+    parser.add_argument("--workers", type=int, default=None, help="max concurrent workers")
+    args = parser.parse_args(argv)
 
+    if args.sample:
+        claims = args.claims or str(config.SAMPLE_CLAIMS_CSV)
+        output = args.output or str(config.REPO_ROOT / "sample_output.csv")
+    else:
+        claims = args.claims or str(config.CLAIMS_CSV)
+        output = args.output or str(config.OUTPUT_CSV)
 
-def _write_output(rows: List[dict], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=_OUTPUT_FIELDNAMES)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def main() -> int:
-    print(f"Loading pipeline…")
-    pipeline = PipelineFactory.create()
-
-    tickets = _read_tickets(settings.paths.input_csv)
-    total = len(tickets)
-    print(f"Processing {total} tickets…\n")
-
-    results: List[dict] = []
-
-    for idx, row in enumerate(tickets, start=1):
-        ticket_text = (row.get("ticket") or row.get("Issue") or "").strip()
-        subject = (row.get("subject") or row.get("Subject") or "").strip()
-        company = (row.get("company") or row.get("Company") or "").strip()
-
-        print(f"  [{idx:02d}/{total}] {subject or ticket_text[:60]!r}", end="  ", flush=True)
-
-        state = TicketState(
-            ticket=ticket_text,
-            subject=subject,
-            company=company,
-        )
-
-        try:
-            output = pipeline.run(state)
-            results.append(output.to_dict())
-            print(f"→ {output.status}")
-        except Exception as exc:
-            print(f"→ ERROR: {exc}")
-            results.append({
-                "status": "escalated",
-                "product_area": "error",
-                "response": "An internal error occurred. Your ticket has been escalated.",
-                "justification": f"Pipeline error: {exc}",
-                "request_type": "product_issue",
-            })
-
-        # Throttle to stay under Gemini free-tier rate limits
-        if idx < total:
-            time.sleep(1)
-
-    _write_output(results, settings.paths.output_csv)
-    print(f"\nDone. Output written to {settings.paths.output_csv}")
-    return 0
+    print(f"Reading {claims}")
+    started = time.time()
+    rows = run(claims, output, config.DATASET_DIR, limit=args.limit, max_workers=args.workers)
+    elapsed = time.time() - started
+    print(f"Wrote {len(rows)} rows to {output} in {elapsed:.1f}s")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

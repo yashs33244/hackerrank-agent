@@ -1,226 +1,82 @@
-# HackerRank Orchestrate — Support Triage Agent
+# Multi-Modal Evidence Review
 
-A multi-agent, context-engineered support triage system for HackerRank, Claude, and Visa support tickets.
+A system that verifies damage claims (`car` | `laptop` | `package`) by inspecting
+the submitted images, the claim conversation, the user's history, and the minimum
+evidence requirements, then writes a 14-column `output.csv`. The **images are the
+primary source of truth**; user history and image authenticity are risk signals
+that never flip the verdict by themselves.
 
-## Architecture
+## No API key: runs on Claude Code
 
-```
-Ticket Input
-     │
-     ▼
-┌─────────────────────────────────────────────────────┐
-│  RouterAgent (gemini-2.0-flash)                     │
-│  • Domain classification (hackerrank/claude/visa)   │
-│  • Pre-flight safety screen (injection detection)   │
-│  • risk_level: LOW / MEDIUM / HIGH / CRITICAL       │
-└────────────────────┬────────────────────────────────┘
-                     │ CRITICAL → escalate immediately
-                     ▼
-┌─────────────────────────────────────────────────────┐
-│  TriageAgent (gemini-2.5-pro)                       │
-│  • replied vs escalated decision                    │
-│  • Forced <thinking> reasoning before output        │
-└────────────────────┬────────────────────────────────┘
-                     │ replied only
-                     ▼
-┌─────────────────────────────────────────────────────┐
-│  ResponderAgent (gemini-2.5-pro / 2.0-flash-high)  │
-│  • Calls search_corpus() as a tool (Agentic RAG)   │
-│  • BM25 → semantic rerank → LLM compression        │
-│  • Hard cap: 3 retrieval+generation calls           │
-└────────────────────┬────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────┐
-│  CriticAgent (gemini-2.0-flash)                     │
-│  • Scores: grounding / safety / completeness (0-10) │
-│  • Pass threshold: all ≥ 7                          │
-│  • Safety < 7 → force escalate                      │
-│  • Grounding/completeness < 7 → retry Responder     │
-└────────────────────┬────────────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────┐
-│  FormatterAgent (pure logic, no LLM)                │
-│  • Produces exactly 5 CSV output columns            │
-│  • Derives product_area from corpus source path     │
-│  • Builds justification from critic scores          │
-└─────────────────────────────────────────────────────┘
-                     │
-                     ▼
-              output.csv
-```
+All model calls go through the local `claude` CLI in headless mode under your
+Claude **subscription** (`agent/client.py`). There is no API key and no
+`anthropic`/`openai` SDK. You only need the `claude` CLI installed and signed in.
 
-## Key Design Decisions
-
-
-| Decision       | Choice                                   | Rationale                                            |
-| -------------- | ---------------------------------------- | ---------------------------------------------------- |
-| RAG type       | Agentic (tool-based)                     | Agent decides what to retrieve, not static pre-fetch |
-| Retrieval      | BM25 → semantic rerank → LLM compression | Token-efficient: only inject relevant sentences      |
-| Orchestration  | Typed `TicketState`                      | Each agent sees only its slice — no token bloat      |
-| Feedback       | 2-gate (Router + Critic)                 | Cheap pre-flight + quality-gated post-draft          |
-| Model routing  | Flash (low) → Pro (medium/high)          | Cost-efficient; Opus only for HIGH risk              |
-| System prompts | Layered B/C pattern + security guardrail | Injection-resistant, reasoning-transparent           |
-
-
-## Setup
+## Quickstart
 
 ```bash
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. Configure API key
-cp ../.env.example ../.env
-# Edit .env: set GEMINI_API_KEY=your_key
-
-# 3. Build the corpus index (one-time, ~4 minutes)
-python -m index.build
-```
-
-## Usage Modes
-
-All commands are run from the **repo root**.
-
-### 1. Batch CSV (original entry point)
-
-```bash
+# Predictions for the 44 test rows -> output.csv
 python code/main.py
+
+# Predictions for the 20 labeled rows -> sample_output.csv
+python code/main.py --sample
+
+# Score a prediction file against the gold labels
+python code/evaluation/main.py sample_output.csv dataset/sample_claims.csv
+
+# Quick smoke run (first N rows)
+python code/main.py --limit 3
 ```
 
-Reads `support_tickets/support_tickets.csv`, writes `support_tickets/output.csv`.
+Requirements: Python 3.12, Pillow, Pydantic v2, ImageMagick (`magick`/`convert`,
+for AVIF -> PNG), and the `claude` CLI. Tests: `python -m pytest -q tests/`.
 
-### 2. Single ticket — CLI
-
-```bash
-python code/cli.py --ticket "I can't log in to my account" --company HackerRank
-python code/cli.py --ticket "Billing charge dispute" --company Visa --subject "Charge query"
-```
-
-Prints a JSON object to stdout:
-
-```json
-{
-  "status": "replied",
-  "product_area": "hackerrank/account",
-  "response": "...",
-  "justification": "...",
-  "request_type": "account_access"
-}
-```
-
-### 3. Batch CSV via CLI (custom paths)
-
-```bash
-python code/cli.py --csv support_tickets/support_tickets.csv
-python code/cli.py --csv /path/to/tickets.csv --output /tmp/results.csv
-```
-
-Same pipeline as `main.py`, with configurable input/output paths.
-
-### 4. Interactive REPL
-
-```bash
-python code/cli.py --interactive
-```
-
-Prompts for ticket text, company, and subject; prints JSON after each ticket. Type `exit` to quit.
-
-### 5. MCP Server (Claude Code / Cursor / Gemini CLI)
-
-```bash
-python code/mcp_server.py
-```
-
-Starts an MCP stdio server exposing the `triage_ticket` tool. Claude Code and Cursor
-auto-discover it via `.mcp.json` at the repo root — no manual configuration needed.
-
-**Manual registration** (if auto-discovery is not available):
-
-```json
-// .mcp.json  (already present at repo root)
-{
-  "mcpServers": {
-    "hackerrank-triage-agent": {
-      "command": "python",
-      "args": ["code/mcp_server.py"]
-    }
-  }
-}
-```
-
-**Tool signature:**
+## Architecture (one agent, internal stages)
 
 ```
-triage_ticket(ticket: str, company?: str, subject?: str) -> TicketOutput
+claims.csv row + user_history + evidence_requirements + images
+  -> S0 normalize/pre-gate   (byte-sniff, AVIF/WebP->PNG, resize 1024, EXIF/pHash)
+  -> S1 claim extract        (Sonnet: multilingual conversation -> structured claim)
+  -> S2 per-image perception (Sonnet: claim-aware-but-skeptical objective facts)
+  -> S4 deterministic tree   (supported/contradicted/NEI + flags + severity)
+  -> S6 strict CSV formatter (14 cols, enum-clamped, the single write path)
 ```
 
-**Example MCP call** (raw JSON-RPC for testing):
+LLM stages propose facts; the deterministic decision tree and formatter dispose
+the final scored enums, so invalid output values are impossible by construction.
+Each subfolder has its own `AGENTS.md` describing its job and invariants.
 
-```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"triage_ticket","arguments":{"ticket":"I cannot submit my solution","company":"HackerRank"}}}' \
-  | python code/mcp_server.py
-```
+## Key design decisions
 
-### CLI quick reference
+- **Byte-level image normalization.** Extensions lie: 8 test `.jpg` files are
+  really AVIF that break naive loaders. Every image is sniffed and normalized to
+  PNG before any vision call.
+- **`valid_image` and `evidence_standard_met` are independent axes** (trust vs
+  coverage); a clear image can still be non-original.
+- **`manual_review_required`** fires only on history-risk, mismatch, wrong-object,
+  authenticity, injection, or unusable images, not on a benign coverage gap.
+- **In-image prompt-injection defense:** image text is transcribed as untrusted
+  data and flagged (`text_instruction_present`); the verdict is judged on pixels.
+- **Claim-aware-but-skeptical perception:** the claim points the model at the part
+  to inspect, but the model is instructed to verify damage independently (best of
+  the three measured strategies; see `evaluation/evaluation_report.md`).
 
-| Flag | Short | Description |
-|---|---|---|
-| `--ticket TEXT` | `-t` | Single ticket text |
-| `--company NAME` | `-c` | Company (HackerRank \| Claude \| Visa) |
-| `--subject TEXT` | `-s` | Subject line |
-| `--csv FILE` | `-f` | Batch CSV input |
-| `--output FILE` | `-o` | Batch CSV output path |
-| `--interactive` | `-i` | Interactive REPL |
+## Results (sample, n=20)
 
-## Project Structure
+`claim_status` 0.85 (Wilson 95% CI [0.64, 0.95], stratified 5-fold 0.833 +/- 0.139),
+`object_part` 0.80, `issue_type` 0.75, `evidence_standard_met` 0.95. Full metrics,
+the >=2-strategy comparison, the operational/cost analysis, and the n=20
+methodology are in [`evaluation/evaluation_report.md`](evaluation/evaluation_report.md).
+
+## Layout
 
 ```
 code/
-├── main.py              # Batch CSV entry point (original)
-├── cli.py               # CLI entry point (--ticket / --csv / --interactive)
-├── mcp_server.py        # MCP stdio server (Claude Code / Cursor / Gemini CLI)
-├── pipeline.py          # Orchestrator: wires agents + retry loop
-├── config.py            # Centralized settings (env vars, paths, model names)
-├── state.py             # TicketState dataclass
-├── agents/
-│   ├── _base.py         # Gemini client factory + prompt loader
-│   ├── router.py        # RouterAgent — domain + pre-flight screen
-│   ├── triage.py        # TriageAgent — escalate vs reply
-│   ├── responder.py     # ResponderAgent — corpus-grounded answer
-│   ├── critic.py        # CriticAgent — 3-axis quality gate
-│   └── formatter.py     # FormatterAgent — 5-column CSV output
-├── index/
-│   ├── build.py         # Offline index builder (run once)
-│   ├── search.py        # BM25Searcher — hybrid retrieval
-│   └── compress.py      # LLM-based context compression
-├── prompts/
-│   ├── router.md        # RouterAgent system prompt
-│   ├── triage.md        # TriageAgent system prompt
-│   ├── responder.md     # ResponderAgent system prompt
-│   └── critic.md        # CriticAgent system prompt
-├── tests/
-│   ├── test_state.py    # TicketState behavior tests
-│   └── test_search.py   # BM25Searcher behavior tests
-└── requirements.txt
-
-.mcp.json                # MCP auto-discovery (Claude Code / Cursor)
+  main.py  pipeline.py  config.py  cache.py
+  domain/   enums, constants, types, evidence_rules, history, decision_tree
+  images/   normalize, authenticity
+  agent/    client (claude CLI), claim_extract, perception, adjudicate, critic
+  prompts/  perception, claim_extract, adjudicate, critic
+  dataio/   reader, schema (Pydantic + clamp), formatter
+  evaluation/ metrics, cross_validation, main, compare, evaluation_report.md
 ```
-
-## Running Tests
-
-```bash
-python -m pytest tests/ -v
-```
-
-All tests are pure unit tests — no API calls, no index required.
-
-## Token Optimization Strategy
-
-1. **BM25 pre-filter** eliminates ~95% of irrelevant chunks before any LLM call
-2. **Semantic rerank** selects top-3 from BM25 survivors (no embedding at inference — index pre-built)
-3. **LLM compression** extracts only relevant sentences from chunks (~70% reduction)
-4. **Scoped TicketState** — each agent receives only its relevant fields, not the full conversation history
-5. **Model routing** — Flash for low-load tasks, Pro only where reasoning depth matters
-6. **Pre-flight escalation** — CRITICAL tickets never reach the Responder (zero Sonnet tokens spent)
-
