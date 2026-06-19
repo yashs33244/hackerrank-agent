@@ -21,10 +21,11 @@ from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
-# Long-edge target in pixels. Resizing before any vision call cuts token cost by
-# roughly half while keeping damage detail legible. Overridable per call so the
-# centralized pipeline config (code/config.py) stays the single source of truth.
-DEFAULT_MAX_EDGE = 1024
+# Long-edge target in pixels. 1568 is Claude's native vision ceiling (~1.15 MP):
+# the API downscales anything larger, so this preserves the maximum usable damage
+# detail without wasting tokens. Overridable per call so the centralized pipeline
+# config (code/config.py) stays the single source of truth.
+DEFAULT_MAX_EDGE = 1568
 
 # Seconds before an ImageMagick conversion is considered hung and aborted.
 MAGICK_TIMEOUT_SECONDS = 30

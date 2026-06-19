@@ -85,27 +85,6 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# Bounded concurrency for the parallel S2 perception subprocesses. Kept modest
-# so we stay polite to the subscription usage window.
-MAX_CONCURRENCY: int = _env_int("MAX_CONCURRENCY", 6)
-
-# Path to the Claude Code binary. Default assumes it is on PATH.
-CLAUDE_BIN: str = os.environ.get("CLAUDE_BIN", "claude")
-
-# Per-call subprocess timeout in seconds. A single headless call (including
-# image Reads) must finish within this budget or it is retried.
-CLAUDE_TIMEOUT_S: int = _env_int("CLAUDE_TIMEOUT_S", 180)
-
-# Longest edge images are resized to before a vision call (cuts vision tokens
-# roughly in half). Pure data here; the resize itself lives in images/.
-IMAGE_MAX_EDGE: int = _env_int("IMAGE_MAX_EDGE", 1024)
-
-# Independent reads per image, majority-voted (self-consistency). Vision calls are
-# not temperature-zero, so >1 denoises the per-image facts and makes the result
-# reproducible. Set to 1 to disable voting (cheapest, noisiest).
-PERCEPTION_SAMPLES: int = _env_int("PERCEPTION_SAMPLES", 3)
-
-
 def _env_bool(name: str, default: bool) -> bool:
     """Read a boolean env var (``1/true/yes`` true; ``0/false/no`` false),
     falling back to ``default`` on absence or an unrecognized value."""
@@ -118,6 +97,51 @@ def _env_bool(name: str, default: bool) -> bool:
     if token in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+# Bounded concurrency for the parallel S2 perception subprocesses. Kept modest
+# so we stay polite to the subscription usage window.
+MAX_CONCURRENCY: int = _env_int("MAX_CONCURRENCY", 6)
+
+# Path to the Claude Code binary. Default assumes it is on PATH.
+CLAUDE_BIN: str = os.environ.get("CLAUDE_BIN", "claude")
+
+# Per-call subprocess timeout in seconds. A single headless call (including
+# image Reads) must finish within this budget or it is retried.
+CLAUDE_TIMEOUT_S: int = _env_int("CLAUDE_TIMEOUT_S", 180)
+
+# Longest edge images are resized to before a vision call. Set to 1568, Claude's
+# native vision ceiling (~1.15 MP): the API downscales anything larger, so 1568 is
+# the most detail the model can actually use, and going higher only wastes tokens.
+# Measured: raising this from 1024 to 1568 lifted object_part 0.85 -> 0.90 (the
+# model uses the finer detail to localize the part) with no regression. Pure data
+# here; the resize itself lives in images/.
+IMAGE_MAX_EDGE: int = _env_int("IMAGE_MAX_EDGE", 1568)
+
+# Independent reads per image, majority-voted (self-consistency). Vision calls are
+# not temperature-zero, so >1 denoises the per-image facts and makes the result
+# reproducible. Set to 1 to disable voting (cheapest, noisiest).
+PERCEPTION_SAMPLES: int = _env_int("PERCEPTION_SAMPLES", 3)
+
+# Multi-model perception ensemble (Karpathy decorrelated voting). Format:
+# "model:count,model:count". Perception reads each named model that many times and
+# majority-votes across the pooled payloads, so two models' uncorrelated errors
+# cancel instead of one model's variance only. Measured (sample): the Sonnet+Opus
+# ensemble lifted overall 0.817 -> 0.840 (claim_status 0.80->0.85, issue_type
+# 0.70->0.75, severity 0.75->0.80, contradicted-recall 2/5->3/5) over either model
+# alone. Set to "" for single-model self-consistency at PERCEPTION_SAMPLES (cheaper,
+# faster: drops the Opus reads).
+PERCEPTION_ENSEMBLE: str = os.environ.get(
+    "PERCEPTION_ENSEMBLE", "claude-sonnet-4-6:2,claude-opus-4-8:2"
+)
+
+# Test-time augmentation: also read center + four corner zoom crops of each image
+# and pool them. Crops recover small damage the downsized full frame loses (a
+# corner dent, a hairline crack). The full image stays authoritative for object /
+# quality / authenticity; crops can only RECOVER missed damage (>=2 must agree), so
+# this lifts recall without admitting single-crop false positives. Costs 5 extra
+# reads per image; off by default.
+PERCEPTION_TTA: bool = _env_bool("PERCEPTION_TTA", False)
 
 
 # Claim-blind perception (S2). When True, the perception model is NOT told what the

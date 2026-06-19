@@ -15,8 +15,15 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from config import MODEL_PERCEPTION, PERCEPTION_CLAIM_BLIND
+from config import (
+    IMAGE_MAX_EDGE,
+    MODEL_PERCEPTION,
+    PERCEPTION_CLAIM_BLIND,
+    PERCEPTION_ENSEMBLE,
+    PERCEPTION_TTA,
+)
 from domain.types import ExtractedClaim, ImageFact
+from images.augment import tile_crops
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 _PROMPT_PATH = _PROMPTS_DIR / "perception.md"
@@ -56,31 +63,135 @@ def perceive_image(
         f"Use the Read tool to open the image file at {image_path}, then analyze "
         f"it as described below.\n\n" + _render_prompt(image_id=image_id, claim=claim)
     )
-    payloads = _read_payloads(base_prompt, image_path, client, max(1, samples))
-    if not payloads:
+    full_payloads = _read_payloads(base_prompt, image_path, client, max(1, samples))
+    if not full_payloads:
         return _safe_default(image_path, image_id)
-    payload = payloads[0] if len(payloads) == 1 else _majority_payload(payloads)
+
+    if PERCEPTION_TTA:
+        crop_payloads = _read_crop_payloads(image_path, image_id, claim, client)
+        payload = _tta_payload(full_payloads, crop_payloads)
+    elif len(full_payloads) == 1:
+        payload = full_payloads[0]
+    else:
+        payload = _majority_payload(full_payloads)
     return _fact_from_payload(payload, image_path, image_id)
+
+
+def _read_crop_payloads(
+    image_path: str, image_id: str, claim: ExtractedClaim, client: Any
+) -> list[dict]:
+    """Read each zoom crop of the image once (test-time augmentation).
+
+    Crops recover small damage the downsized full frame loses. Each is labeled as a
+    zoomed-in region so the model does not treat a tight crop as a framing defect.
+    Returns the per-crop payloads (empty if cropping fails)."""
+    out_dir = Path(image_path).parent
+    crops = tile_crops(image_path, out_dir, IMAGE_MAX_EDGE)
+    payloads: list[dict] = []
+    for crop_path in crops:
+        prompt = (
+            f"Use the Read tool to open the image file at {crop_path}, then analyze "
+            f"it as described below. This is a ZOOMED-IN CROP of one region of a "
+            f"larger photo, so judge only the damage visible here and do NOT report "
+            f"framing/crop as a quality issue.\n\n"
+            + _render_prompt(image_id=image_id, claim=claim)
+        )
+        try:
+            payloads.append(
+                client.run_claude_json(prompt, MODEL_PERCEPTION, image_paths=[str(crop_path)])
+            )
+        except client.ClaudeError:
+            continue
+    return payloads
+
+
+def _model_plan(samples: int) -> list[tuple[str, int]]:
+    """Resolve the (model, read-count) plan for one image.
+
+    With ``config.PERCEPTION_ENSEMBLE`` set (``"model:count,model:count"``) the plan
+    is that explicit cross-model ensemble; otherwise it is a single model read
+    ``samples`` times. A malformed ensemble entry is skipped, and an empty plan
+    falls back to the single-model default so a typo never silences perception."""
+    spec = PERCEPTION_ENSEMBLE.strip()
+    if not spec:
+        return [(MODEL_PERCEPTION, max(1, samples))]
+    plan: list[tuple[str, int]] = []
+    for entry in spec.split(","):
+        model, _, count = entry.strip().partition(":")
+        model = model.strip()
+        if not model:
+            continue
+        try:
+            reads = max(1, int(count)) if count else 1
+        except ValueError:
+            reads = 1
+        plan.append((model, reads))
+    return plan or [(MODEL_PERCEPTION, max(1, samples))]
 
 
 def _read_payloads(
     base_prompt: str, image_path: str, client: Any, samples: int
 ) -> list[dict]:
-    """Read the image ``samples`` times, returning each parsed payload. A nonce per
-    pass keeps the reads independent (distinct cache keys); failed reads are skipped
-    so a single transient error never sinks the vote."""
+    """Read the image per the model plan, returning each parsed payload.
+
+    Reads either a single model ``samples`` times or, when an ensemble is
+    configured, several models pooled together. A nonce per pass keeps reads
+    independent (distinct cache keys); failed reads are skipped so a single
+    transient error never sinks the vote."""
+    plan = _model_plan(samples)
+    total = sum(count for _, count in plan)
     payloads: list[dict] = []
-    for index in range(samples):
-        prompt = base_prompt
-        if samples > 1:
-            prompt = f"{base_prompt}\n\n(Independent reading {index + 1} of {samples}.)"
-        try:
-            payloads.append(
-                client.run_claude_json(prompt, MODEL_PERCEPTION, image_paths=[image_path])
-            )
-        except client.ClaudeError:
-            continue
+    index = 0
+    for model, count in plan:
+        for _ in range(count):
+            index += 1
+            prompt = base_prompt
+            if total > 1:
+                prompt = f"{base_prompt}\n\n(Independent reading {index} of {total}.)"
+            try:
+                payloads.append(
+                    client.run_claude_json(prompt, model, image_paths=[image_path])
+                )
+            except client.ClaudeError:
+                continue
     return payloads
+
+
+# A crop must agree with at least this many other crops before it can RECOVER a
+# damage finding the full frame missed; one lone crop seeing damage is not enough
+# (it would re-admit the single-read false positives voting exists to remove).
+_TTA_DAMAGE_QUORUM = 2
+
+
+def _tta_payload(full_payloads: list[dict], crop_payloads: list[dict]) -> dict:
+    """Fuse the full-image consensus with zoom-crop reads (test-time augmentation).
+
+    The full image stays authoritative for object / quality / authenticity / clarity
+    (a crop has no framing context). Crops only RECOVER damage the full frame missed:
+    if the full consensus saw no damage but a quorum of crops independently report
+    damage, the verdict flips to damaged and the part/issue/severity are taken from
+    those damage-positive crops (the views that actually saw it). When the full image
+    already saw damage, its richer read wins and crops are ignored."""
+    full = _majority_payload(full_payloads) if len(full_payloads) > 1 else full_payloads[0]
+    if not crop_payloads:
+        return full
+    if _as_bool(full.get("has_visible_damage"), False):
+        return full
+
+    positive = [p for p in crop_payloads if _as_bool(p.get("has_visible_damage"), False)]
+    if len(positive) < _TTA_DAMAGE_QUORUM:
+        return full
+
+    def _mode(payloads: list[dict], key: str, default: str) -> str:
+        values = [str(p.get(key, default)).strip().lower() for p in payloads]
+        return Counter(values).most_common(1)[0][0]
+
+    recovered = dict(full)
+    recovered["has_visible_damage"] = True
+    recovered["shown_part"] = _mode(positive, "shown_part", full.get("shown_part", "unknown"))
+    recovered["issue_guess"] = _mode(positive, "issue_guess", "unknown")
+    recovered["severity_guess"] = _mode(positive, "severity_guess", "unknown")
+    return recovered
 
 
 def _majority_payload(payloads: list[dict]) -> dict:

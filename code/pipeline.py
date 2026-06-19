@@ -29,7 +29,6 @@ from domain.decision_tree import decide
 from domain.evidence_rules import load_rules, rule_for
 from domain.history import load_history
 from domain.types import ClaimInput, ImageFact
-from images.authenticity import exif_signals
 from images.normalize import ImageNormalizationError, normalize_image
 
 
@@ -60,18 +59,16 @@ def _safe_fallback_row(claim_input: ClaimInput) -> OutputRow:
 
 
 def _augment_authenticity(fact: ImageFact, source_path: Path) -> None:
-    """Layer deterministic EXIF signals on top of the model's visual judgement.
-    These only raise trust flags; they never decide ``claim_status``."""
-    try:
-        signals = exif_signals(source_path)
-    except Exception:  # EXIF parsing is best-effort; never fail a row over it.
-        return
-    # Only a hard editor signature raises the flag. A merely-absent camera EXIF is
-    # common for legitimately compressed phone photos, so it must NOT imply
-    # non-original (that produced false positives on real claims). Visual
-    # watermark/screenshot detection is left to the perception model.
-    if signals.get("has_editor_software_tag"):
-        fact.non_original = True
+    """Authenticity is decided by the model's visual judgement, not EXIF.
+
+    We previously raised ``non_original`` on an editor-software EXIF tag, but that
+    tag is present in honest phone photos too (ordinary on-device processing edits
+    the file), so it produced false ``non_original_image`` flags on real claims
+    (measured: case_012 carries an editor tag yet is a genuine photo). A
+    stock/watermark/screenshot is far more reliably caught by the perception model
+    reading the pixels, so EXIF no longer feeds ``non_original`` at all
+    (research/10_accuracy_research.md #6: demote EXIF authenticity signals)."""
+    return
 
 
 def _perceive_row_images(

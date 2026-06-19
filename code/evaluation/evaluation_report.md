@@ -4,13 +4,21 @@ Generated for HackerRank Orchestrate (June 2026). All metrics are computed by
 `code/evaluation/` against the 20 labeled rows in `dataset/sample_claims.csv`.
 The 44 `dataset/claims.csv` rows are unlabeled; we never tune against them.
 
+> **Latest accuracy work (Karpathy loop).** A subsequent autonomous accuracy loop
+> (`research/karpathy_loop/`, see `FINDINGS.md` + `accuracy_iterations.png`) lifted the
+> overall sample score 0.810 -> **0.844** via three kept levers - native-resolution
+> input (1568px), a **Sonnet+Opus perception ensemble** (decorrelated voting), and
+> visual-only authenticity - and rejected three (test-time augmentation, claim-blind
+> perception, per-row severity signals) with measured evidence. The final-config
+> per-column numbers below reflect that adopted stack.
+
 ## 1. Headline result (sample, n=20)
 
 | Metric | Value |
 |---|---|
-| `claim_status` accuracy | **0.80-0.85** (16-17/20 across runs) |
-| `claim_status` Wilson 95% CI | **~[0.58, 0.92]** |
-| Stratified 5-fold mean +/- std | **~0.80 +/- 0.13** |
+| `claim_status` accuracy | **0.85** (17/20, ensemble config) |
+| `claim_status` Wilson 95% CI | **~[0.64, 0.95]** |
+| contradicted-recall | **3/5** (was 2/5) |
 
 Two sources of imprecision, reported transparently: (1) at n=20 the Wilson interval
 is ~30 points wide; (2) the vision calls are **not temperature-zero** (the Claude
@@ -23,17 +31,21 @@ contradicted-recall (see §2-§3).
 
 ## 2. Per-column accuracy (sample, final config)
 
-| Column | Accuracy |
-|---|---|
-| `claim_object` (echoed) | 1.00 |
-| `claim_status` | 0.80 |
-| `object_part` | **0.85** (was 0.75) |
-| `issue_type` | 0.70 |
-| `severity` | **0.75** (was 0.70) |
-| `evidence_standard_met` | 0.95 |
-| `valid_image` | **0.90** (was 0.80) |
-| `risk_flags` (multi-label micro-F1) | **0.717** (was 0.56) |
-| `supporting_image_ids` (set exact / Jaccard) | 0.65 / 0.78 |
+| Column | Accuracy (final ensemble config) | Single-Sonnet |
+|---|---|---|
+| `claim_object` (echoed) | 1.00 | 1.00 |
+| `claim_status` | **0.85** | 0.80 |
+| `object_part` | **0.90** | 0.85 |
+| `issue_type` | **0.75** | 0.70 |
+| `severity` | **0.80** | 0.75 |
+| `evidence_standard_met` | 0.95 | 0.95 |
+| `valid_image` | 0.90 | 0.90 |
+| `risk_flags` (multi-label micro-F1) | **0.755** | 0.717 |
+| `supporting_image_ids` (set exact / Jaccard) | 0.65 / 0.80 | 0.65 / 0.78 |
+
+The right-hand column is the cheaper single-Sonnet config (`PERCEPTION_ENSEMBLE=""`);
+the adopted default is the Sonnet+Opus ensemble. Full iteration history and the
+rejected experiments are in `research/karpathy_loop/`.
 
 Five pre-registered changes from the accuracy-research pass (`research/10`), each
 measured once:

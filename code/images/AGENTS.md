@@ -5,7 +5,8 @@ and 8 test images are AVIF that break naive loaders. Everything here exists so
 that never silently corrupts a row.
 
 - `normalize.py` — byte-sniff true format; convert anything (incl. AVIF via
-  ImageMagick, since `pillow_heif` is absent) to PNG; resize long edge to 1024px;
+  ImageMagick, since `pillow_heif` is absent) to PNG; resize long edge to 1568px
+  (Claude's native vision ceiling; measured object_part 0.85 -> 0.90 vs 1024px);
   assert every image decodes before any model call.
 - `authenticity.py` — EXIF signals, perceptual hash, recycled-image detection.
   These FEED `non_original_image` / `possible_manipulation` priors; they never
